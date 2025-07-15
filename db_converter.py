@@ -32,6 +32,7 @@ def parse(input_filename, *output_filename):
     index_lines = []
     sequence_lines = []
     cast_lines = []
+    comment_lines = []
     num_inserts = 0
     started = time.time()
 
@@ -108,14 +109,24 @@ def parse(input_filename, *output_filename):
                 extra = re.sub(r"CHARACTER SET [\w\d]+\s*", "", extra.replace("unsigned", ""))
                 extra = re.sub(r"COLLATE [\w\d]+\s*", "", extra.replace("unsigned", ""))
 
+                # Extract comment for PostgreSQL
+                comment_match = re.search(r"COMMENT\s+'([^']*)'", extra, re.IGNORECASE)
+                comment = comment_match.group(1) if comment_match else None
+                extra = re.sub(r"COMMENT\s+'[^']*'", "", extra, flags=re.IGNORECASE).strip()
+
                 auto_increment = extra.find("AUTO_INCREMENT") != -1
                 extra = extra.replace("AUTO_INCREMENT", "").strip()
+                
+                # Handle NOT NULL constraint - only add if not already specified
+                if "NOT NULL" not in extra and "NULL" not in extra and final_type != "boolean":
+                    # Add NOT NULL only if neither NULL nor NOT NULL is specified
+                    extra = f"{extra} NOT NULL".strip() if extra else "NOT NULL"
 
                 # See if it needs type conversion
                 final_type = None
                 if type.startswith("tinyint(") or type.startswith("smallint("):
-                    # if type.startswith("tinyint(1)"):
-                    #     final_type = "boolean"
+                    if type.startswith("tinyint(1)"):
+                        final_type = "boolean"
                     if auto_increment:
                         type = "serial"
                     else:
@@ -128,11 +139,11 @@ def parse(input_filename, *output_filename):
                     type = "bigint"
                     if auto_increment:
                         type = "bigserial"
-                elif type == "longtext":
+                elif type == "longtext" or type.startswith("longtext"):
                     type = "text"
-                elif type == "mediumtext":
+                elif type == "mediumtext" or type.startswith("mediumtext"):
                     type = "text"
-                elif type == "tinytext":
+                elif type == "tinytext" or type.startswith("tinytext"):
                     type = "text"
                 elif type.startswith("varchar("):
                     size = int(type.split("(")[1].rstrip(")"))
@@ -161,9 +172,19 @@ def parse(input_filename, *output_filename):
                         enum_types.append(enum_name)
 
                     type = enum_name
+                elif type.startswith("json"):
+                    type = "jsonb"  # or "json" depending on your needs
+                elif type.startswith("decimal(") or type.startswith("numeric("):
+                    # Keep the precision and scale
+                    type = type.replace("decimal", "numeric")
 
                 if final_type:
                     cast_lines.append(f'ALTER TABLE "{current_table}" ALTER COLUMN "{name}" DROP DEFAULT, ALTER COLUMN "{name}" TYPE {final_type} USING CAST("{name}" as {final_type})')
+                
+                # Add column comment if exists
+                if comment:
+                    comment_lines.append(f'COMMENT ON COLUMN "{current_table}"."{name}" IS \'{comment}\';')
+                
                 # ID fields need sequences [if they are integers?]
                 # if name == "id" and set_sequence is True:
                 #     sequence_lines.append(f"CREATE SEQUENCE {current_table}_id_seq")
@@ -225,6 +246,11 @@ def parse(input_filename, *output_filename):
     constraint_f.write("\n-- Full Text keys --\n")
     for line in fulltext_key_lines:
         constraint_f.write(f"{line};\n")
+
+    # Write column comments out
+    constraint_f.write("\n-- Column comments --\n")
+    for line in comment_lines:
+        constraint_f.write(f"{line}\n")
 
     # Finish file
     constraint_f.write("\n")
